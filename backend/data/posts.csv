@@ -1,0 +1,11 @@
+post_id,user_id,platform,timestamp,text
+1,user_A,telegram,2026-09-08 10:00:00,"Fuel prices are increasing again."
+2,user_B,telegram,2026-09-08 10:05:00,"Fuel prices are too expensive!"
+3,user_C,telegram,2026-09-08 10:10:00,"I think the government should do something."
+4,user_D,x,2026-09-08 10:15:00,"Fuel prices are finally being controlled."
+5,user_E,x,2026-09-08 10:20:00,"This price increase is hurting everyone."
+6,user_F,telegram,2026-09-08 10:25:00,"We need action immediately!"
+7,user_G,x,2026-09-08 10:30:00,"Fuel prices are becoming a major issue."
+8,user_H,telegram,2026-09-08 10:35:00,"I completely support this demand."
+9,user_I,x,2026-09-08 10:40:00,"Nothing is going to change."
+10,user_J,telegram,2026-09-08 10:45:00,"People are getting angry about fuel prices."
