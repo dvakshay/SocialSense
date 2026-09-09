@@ -1,20 +1,25 @@
 import pandas as pd
+from services.analyze import analyze_post
 
-from services.analyzer import analyze_sentiment
 
-
-# Load social media posts
 posts = pd.read_csv("data/posts.csv")
 
-print("SOCIALSENSE ANALYSIS")
-print("====================")
+print("SOCIALSENSE INTELLIGENCE")
+print("========================")
+
 
 for _, post in posts.iterrows():
 
-    sentiment = analyze_sentiment(post["text"])
+    result = analyze_post(post["text"])
 
     print()
+    print("Post ID:", post["post_id"])
     print("User:", post["user_id"])
     print("Platform:", post["platform"])
     print("Text:", post["text"])
-    print("Sentiment:", sentiment)
+
+    print("Sentiment:", result["sentiment"]["label"])
+    print("Sentiment Confidence:", result["sentiment"]["confidence"])
+
+    print("Emotion:", result["emotion"]["emotion"])
+    print("Emotion Confidence:", result["emotion"]["confidence"])
