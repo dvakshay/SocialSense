@@ -1,25 +1,32 @@
-import pandas as pd
-from services.analyze import analyze_post
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from api.routes import router
 
 
-posts = pd.read_csv("data/posts.csv")
+app = FastAPI(
+    title="SocialSense API",
+    description="AI-powered Social Media Intelligence Platform",
+    version="1.0.0"
+)
 
-print("SOCIALSENSE INTELLIGENCE")
-print("========================")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-for _, post in posts.iterrows():
+app.include_router(router)
 
-    result = analyze_post(post["text"])
 
-    print()
-    print("Post ID:", post["post_id"])
-    print("User:", post["user_id"])
-    print("Platform:", post["platform"])
-    print("Text:", post["text"])
+@app.get("/")
+def root():
 
-    print("Sentiment:", result["sentiment"]["label"])
-    print("Sentiment Confidence:", result["sentiment"]["confidence"])
-
-    print("Emotion:", result["emotion"]["emotion"])
-    print("Emotion Confidence:", result["emotion"]["confidence"])
+    return {
+        "status": "online",
+        "service": "SocialSense Intelligence API"
+    }
