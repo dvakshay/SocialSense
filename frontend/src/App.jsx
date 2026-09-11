@@ -35,6 +35,8 @@ function App() {
 
   const [trends, setTrends] = useState(null);
 
+  const [topics, setTopics] = useState([]);
+
   const [propagation, setPropagation] = useState([]);
 
   const [loading, setLoading] = useState(true);
@@ -49,75 +51,76 @@ function App() {
    * ==============================
    */
 
-  useEffect(() => {
-    console.log(
-      "SocialSense: fetching intelligence data..."
+ useEffect(() => {
+  const fetchIntelligence = async () => {
+    
+
+    try {
+      const [
+        intelligenceResponse,
+        networkResponse,
+        trendsResponse,
+        propagationResponse,
+         topicsResponse,
+      ] = await Promise.all([
+        axios.get(`${API_BASE_URL}/intelligence`),
+        axios.get(`${API_BASE_URL}/network`),
+        axios.get(`${API_BASE_URL}/trends`),
+        axios.get(`${API_BASE_URL}/propagation`),
+        axios.get(`${API_BASE_URL}/topics`),
+      ]);
+
+      console.log(
+        "SocialSense: live data refreshed"
+      );
+
+      setIntelligence(
+        intelligenceResponse.data
+      );
+
+      setNetwork(
+        networkResponse.data
+      );
+
+      setTrends(
+        trendsResponse.data
+      );
+
+      setPropagation(
+        propagationResponse.data
+      );
+
+      setTopics(
+        topicsResponse.data.topics || []
     );
 
-    Promise.all([
-      axios.get(`${API_BASE_URL}/intelligence`),
-      axios.get(`${API_BASE_URL}/network`),
-      axios.get(`${API_BASE_URL}/trends`),
-      axios.get(`${API_BASE_URL}/propagation`),
-    ])
-      .then(
-        ([
-          intelligenceResponse,
-          networkResponse,
-          trendsResponse,
-          propagationResponse,
-        ]) => {
-          console.log(
-            "Intelligence API:",
-            intelligenceResponse.data
-          );
+      setLoading(false);
+      setApiError(false);
+    } catch (error) {
+      console.error(
+        "SocialSense API connection failed:",
+        error
+      );
 
-          console.log(
-            "Network API:",
-            networkResponse.data
-          );
+      setLoading(false);
+      setApiError(true);
+    }
+  };
 
-          console.log(
-            "Trends API:",
-            trendsResponse.data
-          );
+  // Fetch immediately when dashboard opens.
+  fetchIntelligence();
 
-          console.log(
-            "Propagation API:",
-            propagationResponse.data
-          );
+  // Refresh every 5 seconds.
+  const refreshInterval = setInterval(
+    fetchIntelligence,
+    5000
+  );
 
-          setIntelligence(
-            intelligenceResponse.data
-          );
-
-          setNetwork(
-            networkResponse.data
-          );
-
-          setTrends(
-            trendsResponse.data
-          );
-
-          setPropagation(
-            propagationResponse.data
-          );
-
-          setLoading(false);
-          setApiError(false);
-        }
-      )
-      .catch((error) => {
-        console.error(
-          "SocialSense API connection failed:",
-          error
-        );
-
-        setLoading(false);
-        setApiError(true);
-      });
-  }, []);
-
+  // Stop the timer when the dashboard closes.
+  return () => {
+    clearInterval(refreshInterval);
+  };
+}, []);
   /*
    * ==============================
    * GLOBAL STATISTICS
@@ -830,33 +833,39 @@ function App() {
         </div>
 
         <div className="topic-grid">
-          {[
-            "fuel",
-            "prices",
-            "expensive",
-            "increasing",
-            "change",
-          ].map(
-            (topic, index) => (
-              <div
-                className="topic-card"
-                key={topic}
-              >
-                <span>
-                  0{index + 1}
-                </span>
+  {topics.length > 0 ? (
+    topics.map((topic, index) => (
+      <div
+        className="topic-card"
+        key={`${topic}-${index}`}
+      >
+        <span>
+          {String(index + 1).padStart(2, "0")}
+        </span>
 
-                <strong>
-                  {topic}
-                </strong>
+        <strong>
+          {topic}
+        </strong>
 
-                <small>
-                  Detected topic
-                </small>
-              </div>
-            )
-          )}
-        </div>
+        <small>
+          Detected by TF-IDF
+        </small>
+      </div>
+    ))
+  ) : (
+    <div className="topic-card">
+      <span>--</span>
+
+      <strong>
+        No topics detected
+      </strong>
+
+      <small>
+        Waiting for conversation data
+      </small>
+    </div>
+  )}
+</div>
 
         <div className="section-title">
           <span>
