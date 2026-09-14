@@ -1,15 +1,25 @@
 from transformers import pipeline
 
 
-# Load the pre-trained sentiment model once
-sentiment_model = pipeline(
-    "sentiment-analysis",
-    model="distilbert-base-uncased-finetuned-sst-2-english"
-)
+_sentiment_model = None
+
+
+def get_sentiment_model():
+    global _sentiment_model
+
+    if _sentiment_model is None:
+        _sentiment_model = pipeline(
+            "sentiment-analysis",
+            model="distilbert-base-uncased-finetuned-sst-2-english"
+        )
+
+    return _sentiment_model
 
 
 def analyze_sentiment(text):
-    result = sentiment_model(text)[0]
+    model = get_sentiment_model()
+
+    result = model(text)[0]
 
     return {
         "label": result["label"].lower(),
