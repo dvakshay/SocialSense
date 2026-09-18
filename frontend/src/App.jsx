@@ -40,11 +40,15 @@ function App() {
 
   const [propagation, setPropagation] = useState([]);
 
+  const [livePosts, setLivePosts] = useState([]);
+
   const [loading, setLoading] = useState(true);
 
   const [apiError, setApiError] = useState(false);
 
   const [selectedNode, setSelectedNode] = useState(null);
+
+  const [selectedConnection, setSelectedConnection] = useState(null);
 
   /*
    * ==============================
@@ -62,13 +66,15 @@ function App() {
         networkResponse,
         trendsResponse,
         propagationResponse,
-         topicsResponse,
+        topicsResponse,
+        livePostsResponse,
       ] = await Promise.all([
         axios.get(`${API_BASE_URL}/intelligence`),
         axios.get(`${API_BASE_URL}/network`),
         axios.get(`${API_BASE_URL}/trends`),
         axios.get(`${API_BASE_URL}/propagation`),
         axios.get(`${API_BASE_URL}/topics`),
+        axios.get(`${API_BASE_URL}/live-posts`),
       ]);
 
       console.log(
@@ -93,7 +99,11 @@ function App() {
 
       setTopics(
         topicsResponse.data.topics || []
-    );
+      );
+
+      setLivePosts(
+        livePostsResponse.data.posts || []
+      );
 
       setLoading(false);
       setApiError(false);
@@ -178,6 +188,124 @@ function App() {
 
   /*
    * ==============================
+   * EMOTION SIGNAL
+   * ==============================
+   *
+   * Emotion is displayed only as an aggregate signal.
+   * The backend may expose the mapped emotion as `emotion`,
+   * `emotion_label`, or `emotion_bucket`.
+   */
+
+  const emotionSummary = useMemo(() => {
+    const counts = {};
+
+    intelligence.forEach((post) => {
+      const rawEmotion =
+        post.emotion_bucket ??
+        post.emotion_label ??
+        post.emotion ??
+        null;
+
+      if (!rawEmotion) {
+        return;
+      }
+
+      const emotion = String(rawEmotion).trim();
+
+      if (!emotion) {
+        return;
+      }
+
+      counts[emotion] =
+        (counts[emotion] || 0) + 1;
+    });
+
+    const ranked = Object.entries(counts)
+      .sort((a, b) => b[1] - a[1]);
+
+    return {
+      dominant: ranked.length > 0 ? ranked[0][0] : null,
+      count: ranked.length > 0 ? ranked[0][1] : 0,
+      total: ranked.reduce(
+        (sum, [, count]) => sum + count,
+        0
+      ),
+    };
+  }, [intelligence]);
+
+  /*
+   * ==============================
+   * LIVE NARRATIVE TIMELINE
+   * ==============================
+   *
+   * Build the narrative timeline directly from
+   * the currently observed intelligence posts.
+   * This means newly ingested Telegram events are
+   * reflected here after the next dashboard refresh.
+   */
+
+  const liveTimeline = useMemo(() => {
+    const timestamps = intelligence
+      .map((post) => new Date(post.timestamp))
+      .filter((date) => !Number.isNaN(date.getTime()))
+      .sort((a, b) => a - b);
+
+    if (timestamps.length === 0) {
+      return [];
+    }
+
+    // Group posts into 10-minute time buckets.
+    const bucketMap = {};
+
+    timestamps.forEach((date) => {
+      const bucketStart = new Date(date);
+      bucketStart.setMinutes(
+        Math.floor(bucketStart.getMinutes() / 10) * 10,
+        0,
+        0
+      );
+
+      const key = bucketStart.getTime();
+
+      bucketMap[key] = (bucketMap[key] || 0) + 1;
+    });
+
+    return Object.entries(bucketMap)
+      .sort(([a], [b]) => Number(a) - Number(b))
+      .map(([time, count]) => ({
+        time_bucket: Number(time),
+        post_count: count,
+      }))
+      .slice(-8);
+  }, [intelligence]);
+
+  /*
+   * Growth is calculated from the two most recent
+   * 10-minute observation buckets.
+   */
+
+  const liveGrowthRate = useMemo(() => {
+    if (liveTimeline.length < 2) {
+      return 0;
+    }
+
+    const previous =
+      liveTimeline[liveTimeline.length - 2].post_count;
+
+    const latest =
+      liveTimeline[liveTimeline.length - 1].post_count;
+
+    if (previous === 0) {
+      return latest > 0 ? 100 : 0;
+    }
+
+    return Math.round(
+      ((latest - previous) / previous) * 100
+    );
+  }, [liveTimeline]);
+
+  /*
+   * ==============================
    * TOP INFLUENCERS
    * ==============================
    */
@@ -252,76 +380,97 @@ function App() {
       return [];
     }
 
-    const centerX = 430;
-    const centerY = 280;
+    const enriched = nodes.map((node) => {
+      const userId = node.user_id || node.id || node.name;
+      const intelligenceUser = intelligence.find(
+        (post) => post.user_id === userId
+      );
 
-    const radius = Math.min(
-      210,
-      80 + nodes.length * 12
-    );
+      return {
+        ...node,
+        user_id: userId,
+        community: node.community ?? intelligenceUser?.community ?? null,
+        pagerank: node.pagerank ?? intelligenceUser?.pagerank ?? 0,
+        betweenness: node.betweenness ?? intelligenceUser?.betweenness ?? 0,
+        influence_score:
+          node.influence_score ?? intelligenceUser?.influence_score ?? 0,
+      };
+    });
 
-    return nodes.map(
-      (node, index) => {
-        const userId =
-          node.user_id ||
-          node.id ||
-          node.name;
+    const groups = {};
+    enriched.forEach((node) => {
+      const key =
+        node.community === null || node.community === undefined
+          ? "unassigned"
+          : String(node.community);
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(node);
+    });
 
-        const intelligenceUser =
-          intelligence.find(
-            (post) =>
-              post.user_id === userId
-          );
+    const groupEntries = Object.entries(groups);
+    const centerX = 490;
+    const centerY = 310;
 
-        const angle =
-          (2 * Math.PI * index) /
-            nodes.length -
-          Math.PI / 2;
+    const anchors =
+      groupEntries.length === 1
+        ? [{ x: centerX, y: centerY }]
+        : groupEntries.length === 2
+        ? [
+            { x: 320, y: centerY },
+            { x: 660, y: centerY },
+          ]
+        : groupEntries.length === 3
+        ? [
+            { x: 490, y: 175 },
+            { x: 300, y: 425 },
+            { x: 680, y: 425 },
+          ]
+        : [
+            { x: 315, y: 190 },
+            { x: 665, y: 190 },
+            { x: 315, y: 430 },
+            { x: 665, y: 430 },
+          ];
 
-        const x =
-          centerX +
-          radius *
-            Math.cos(angle);
+    return enriched.map((node) => {
+      const key =
+        node.community === null || node.community === undefined
+          ? "unassigned"
+          : String(node.community);
 
-        const y =
-          centerY +
-          radius *
-            Math.sin(angle);
-
-        return {
-          ...node,
-
-          user_id: userId,
-
-          community:
-            node.community ??
-            intelligenceUser?.community ??
-            null,
-
-          pagerank:
-            node.pagerank ??
-            intelligenceUser?.pagerank ??
-            0,
-
-          betweenness:
-            node.betweenness ??
-            intelligenceUser?.betweenness ??
-            0,
-
-          influence_score:
-            node.influence_score ??
-            intelligenceUser?.influence_score ??
-            0,
-
-          x,
-          y,
+      const groupIndex = groupEntries.findIndex(
+        ([groupKey]) => groupKey === key
+      );
+      const members = groupEntries[groupIndex]?.[1] || [node];
+      const memberIndex = members.findIndex(
+        (member) => member.user_id === node.user_id
+      );
+      const anchor =
+        anchors[groupIndex % anchors.length] || {
+          x: centerX,
+          y: centerY,
         };
-      }
-    );
-  }, [
-    network.nodes,
-    intelligence,
-  ]);
+
+      const localRadius =
+        members.length <= 1
+          ? 0
+          : Math.min(72, 38 + members.length * 6);
+
+      const angle =
+        members.length <= 1
+          ? 0
+          : -Math.PI / 2 +
+            memberIndex * ((2 * Math.PI) / members.length);
+
+      return {
+        ...node,
+        x: anchor.x + localRadius * Math.cos(angle),
+        y: anchor.y + localRadius * Math.sin(angle),
+        groupX: anchor.x,
+        groupY: anchor.y,
+      };
+    });
+  }, [network.nodes, intelligence]);
 
   /*
    * ==============================
@@ -357,6 +506,34 @@ function App() {
   const handleNavigation = (page) => {
     setActivePage(page);
     setSelectedNode(null);
+    setSelectedConnection(null);
+  };
+
+  const focusNetworkGraph = () => {
+    requestAnimationFrame(() => {
+      document
+        .getElementById("network-topology-card")
+        ?.scrollIntoView({
+          behavior: "smooth",
+          block: "center",
+        });
+    });
+  };
+
+  const inspectParticipant = (user) => {
+    setSelectedConnection(null);
+    setSelectedNode(user);
+    focusNetworkGraph();
+  };
+
+  const inspectConnection = (link, index) => {
+    setSelectedConnection(index);
+
+    const sourceNode =
+      nodeMap[link.source];
+
+    setSelectedNode(sourceNode || null);
+    focusNetworkGraph();
   };
 
   /*
@@ -366,120 +543,214 @@ function App() {
    */
 
   const renderSidebar = () => (
-    <aside className="sidebar">
-      <div className="brand">
-        <div className="brand-icon">
-          <Radio size={20} />
+  <aside className="w-[250px] min-h-screen shrink-0 border-r border-white/[0.07] bg-[#090b10] flex flex-col">
+
+    {/* BRAND */}
+    <div className="px-5 pt-6 pb-7">
+      <div className="flex items-center gap-3">
+
+        <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-blue-400/20 bg-blue-500/10 text-blue-400">
+          <Radio size={19} />
         </div>
 
-        <div>
-          <h1>
+        <div className="min-w-0">
+          <h1 className="text-[15px] font-semibold tracking-wide text-white">
             SocialSense
           </h1>
 
-          <span>
-            INTELLIGENCE PLATFORM
-          </span>
+          <p className="mt-0.5 text-[9px] font-medium tracking-[0.18em] text-slate-500">
+            INTELLIGENCE OS
+          </p>
         </div>
-      </div>
 
-      <nav className="navigation">
+      </div>
+    </div>
+
+    {/* NAVIGATION */}
+    <div className="px-3">
+
+      <p className="mb-2 px-3 text-[9px] font-semibold tracking-[0.18em] text-slate-600">
+        WORKSPACE
+      </p>
+
+      <nav className="space-y-1">
+
+        {/* OVERVIEW */}
         <button
-          className={`nav-item ${
+          onClick={() => handleNavigation("overview")}
+          className={`group flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-all duration-200 ${
             activePage === "overview"
-              ? "active"
-              : ""
+              ? "border border-blue-400/10 bg-blue-500/[0.09] text-white"
+              : "border border-transparent text-slate-400 hover:bg-white/[0.035] hover:text-slate-200"
           }`}
-          onClick={() =>
-            handleNavigation(
-              "overview"
-            )
-          }
         >
-          <Activity size={18} />
+          <Activity
+            size={17}
+            className={
+              activePage === "overview"
+                ? "text-blue-400"
+                : "text-slate-500 group-hover:text-slate-300"
+            }
+          />
 
-          <span>
-            Overview
-          </span>
+          <span>Overview</span>
+
+          {activePage === "overview" && (
+            <span className="ml-auto h-1.5 w-1.5 rounded-full bg-blue-400 shadow-[0_0_8px_rgba(96,165,250,0.8)]" />
+          )}
         </button>
 
+        {/* NARRATIVES */}
         <button
-          className={`nav-item ${
+          onClick={() => handleNavigation("narratives")}
+          className={`group flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-all duration-200 ${
             activePage === "narratives"
-              ? "active"
-              : ""
+              ? "border border-blue-400/10 bg-blue-500/[0.09] text-white"
+              : "border border-transparent text-slate-400 hover:bg-white/[0.035] hover:text-slate-200"
           }`}
-          onClick={() =>
-            handleNavigation(
-              "narratives"
-            )
-          }
         >
-          <TrendingUp size={18} />
+          <TrendingUp
+            size={17}
+            className={
+              activePage === "narratives"
+                ? "text-blue-400"
+                : "text-slate-500 group-hover:text-slate-300"
+            }
+          />
 
-          <span>
-            Narratives
-          </span>
+          <span>Narratives</span>
+
+          {activePage === "narratives" && (
+            <span className="ml-auto h-1.5 w-1.5 rounded-full bg-blue-400 shadow-[0_0_8px_rgba(96,165,250,0.8)]" />
+          )}
         </button>
 
+        {/* NETWORK */}
         <button
-          className={`nav-item ${
+          onClick={() => handleNavigation("network")}
+          className={`group flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-all duration-200 ${
             activePage === "network"
-              ? "active"
-              : ""
+              ? "border border-blue-400/10 bg-blue-500/[0.09] text-white"
+              : "border border-transparent text-slate-400 hover:bg-white/[0.035] hover:text-slate-200"
           }`}
-          onClick={() =>
-            handleNavigation(
-              "network"
-            )
-          }
         >
-          <Network size={18} />
+          <Network
+            size={17}
+            className={
+              activePage === "network"
+                ? "text-blue-400"
+                : "text-slate-500 group-hover:text-slate-300"
+            }
+          />
 
-          <span>
-            Network
-          </span>
+          <span>Network</span>
+
+          {activePage === "network" && (
+            <span className="ml-auto h-1.5 w-1.5 rounded-full bg-blue-400 shadow-[0_0_8px_rgba(96,165,250,0.8)]" />
+          )}
         </button>
 
+        {/* MONITORING */}
         <button
-          className={`nav-item ${
+          onClick={() => handleNavigation("monitoring")}
+          className={`group flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-all duration-200 ${
             activePage === "monitoring"
-              ? "active"
-              : ""
+              ? "border border-blue-400/10 bg-blue-500/[0.09] text-white"
+              : "border border-transparent text-slate-400 hover:bg-white/[0.035] hover:text-slate-200"
           }`}
-          onClick={() =>
-            handleNavigation(
-              "monitoring"
-            )
-          }
         >
-          <Shield size={18} />
+          <Shield
+            size={17}
+            className={
+              activePage === "monitoring"
+                ? "text-blue-400"
+                : "text-slate-500 group-hover:text-slate-300"
+            }
+          />
 
-          <span>
-            Monitoring
-          </span>
+          <span>Monitoring</span>
+
+          {activePage === "monitoring" && (
+            <span className="ml-auto h-1.5 w-1.5 rounded-full bg-blue-400 shadow-[0_0_8px_rgba(96,165,250,0.8)]" />
+          )}
         </button>
+
       </nav>
+    </div>
 
-      <div className="sidebar-footer">
-        <div className="status-dot"></div>
+    {/* LIVE SOURCES */}
+    <div className="mt-8 px-3">
 
-        <div>
-          <strong>
-            {apiError
-              ? "API Offline"
-              : "System Online"}
-          </strong>
+      <p className="mb-2 px-3 text-[9px] font-semibold tracking-[0.18em] text-slate-600">
+        LIVE SOURCES
+      </p>
 
-          <span>
-            {apiError
-              ? "Backend connection failed"
-              : "Intelligence engine active"}
+      <div className="space-y-1">
+
+        <div className="flex items-center gap-3 rounded-lg px-3 py-2.5">
+          <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]" />
+
+          <span className="text-sm text-slate-300">
+            Telegram
+          </span>
+
+          <span className="ml-auto text-[9px] font-semibold tracking-wider text-emerald-400">
+            LIVE
           </span>
         </div>
+
+        <div className="flex items-center gap-3 rounded-lg px-3 py-2.5">
+          <span className="h-2 w-2 rounded-full bg-slate-600" />
+
+          <span className="text-sm text-slate-500">
+            X
+          </span>
+
+          <span className="ml-auto text-[9px] font-semibold tracking-wider text-slate-600">
+            DATA
+          </span>
+        </div>
+
       </div>
-    </aside>
-  );
+    </div>
+
+    {/* SYSTEM STATUS */}
+    <div className="mt-auto p-3">
+
+      <div className="rounded-xl border border-white/[0.06] bg-white/[0.02] p-3">
+
+        <div className="flex items-start gap-3">
+
+          <span
+            className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${
+              apiError
+                ? "bg-red-400 shadow-[0_0_8px_rgba(248,113,113,0.7)]"
+                : "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.7)]"
+            }`}
+          />
+
+          <div className="min-w-0">
+            <p className="text-[11px] font-medium text-slate-200">
+              {apiError
+                ? "API Offline"
+                : "System Online"}
+            </p>
+
+            <p className="mt-0.5 text-[9px] leading-4 text-slate-600">
+              {apiError
+                ? "Backend connection failed"
+                : "Intelligence engine active"}
+            </p>
+          </div>
+
+        </div>
+
+      </div>
+
+    </div>
+
+  </aside>
+);
 
   /*
    * ==============================
@@ -520,407 +791,1160 @@ function App() {
    */
 
   const renderOverview = () => (
-    <>
-      {renderTopbar(
-        "Operational Overview"
-      )}
+  <>
+    {/* TOP BAR */}
+    <header className="flex items-center justify-between border-b border-white/[0.06] px-8 py-5">
+      <div>
+        <p className="mb-1 text-[10px] font-semibold tracking-[0.2em] text-blue-400/70">
+          SOCIAL MEDIA INTELLIGENCE
+        </p>
 
-      <section className="dashboard">
-        <div className="welcome-card">
-          <div>
-            <p className="eyebrow">
-              SOCIALSENSE CORE
-            </p>
+        <h2 className="text-2xl font-semibold tracking-tight text-white">
+          Intelligence Overview
+        </h2>
+      </div>
 
-            <h3>
-              Monitor narratives.
+      <div
+        className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-[10px] font-semibold tracking-[0.15em] ${
+          apiError
+            ? "border-red-400/20 bg-red-400/5 text-red-300"
+            : "border-emerald-400/20 bg-emerald-400/5 text-emerald-300"
+        }`}
+      >
+        <span
+          className={`h-1.5 w-1.5 rounded-full ${
+            apiError
+              ? "bg-red-400"
+              : "bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]"
+          }`}
+        />
+
+        {apiError ? "OFFLINE" : "LIVE"}
+      </div>
+    </header>
+
+    {/* MAIN CONTENT */}
+    <section className="space-y-8 px-8 py-8">
+
+      {/* HERO */}
+      <div className="relative overflow-hidden rounded-2xl border border-white/[0.07] bg-gradient-to-br from-[#141923] via-[#10141c] to-[#0b0e14] p-8">
+
+        {/* Background glow */}
+        <div className="pointer-events-none absolute -right-24 -top-24 h-64 w-64 rounded-full bg-blue-500/[0.06] blur-3xl" />
+
+        <div className="relative flex items-center justify-between gap-10">
+
+          <div className="max-w-3xl">
+
+            <div className="mb-4 flex items-center gap-2">
+              <span className="h-1.5 w-1.5 rounded-full bg-blue-400 shadow-[0_0_8px_rgba(96,165,250,0.8)]" />
+
+              <span className="text-[10px] font-semibold tracking-[0.2em] text-blue-300/70">
+                SOCIALSENSE CORE
+              </span>
+            </div>
+
+            <h3 className="text-4xl font-semibold leading-[1.08] tracking-tight text-white">
+              Observe the conversation.
               <br />
-              Understand influence.
+              Understand the network.
               <br />
-              Track propagation.
+              Trace the narrative.
             </h3>
 
-            <p className="description">
-              AI-powered analysis of social
-              conversations, communities and
-              information flow.
+            <p className="mt-5 max-w-2xl text-sm leading-6 text-slate-400">
+              SocialSense connects social-media activity, audience signals,
+              network structure and information propagation into one
+              intelligence workflow.
             </p>
-          </div>
 
-          <div className="radar">
-            <div className="radar-ring ring-one"></div>
+            <div className="mt-7 flex flex-wrap items-center gap-3">
 
-            <div className="radar-ring ring-two"></div>
+              <button
+                onClick={() => handleNavigation("narratives")}
+                className="group inline-flex items-center gap-2 rounded-lg border border-blue-400/20 bg-blue-500/10 px-4 py-2.5 text-xs font-semibold text-blue-200 transition-all duration-200 hover:border-blue-400/30 hover:bg-blue-500/15"
+              >
+                Investigate Narrative
 
-            <div className="radar-ring ring-three"></div>
+                <ArrowUpRight
+                  size={15}
+                  className="transition-transform duration-200 group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
+                />
+              </button>
 
-            <div className="radar-core">
-              <Activity size={28} />
+              <button
+                onClick={() => handleNavigation("network")}
+                className="inline-flex items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.02] px-4 py-2.5 text-xs font-medium text-slate-300 transition-all duration-200 hover:bg-white/[0.05] hover:text-white"
+              >
+                <Network size={14} />
+                Explore Network
+              </button>
+
             </div>
           </div>
-        </div>
 
-        <div className="section-title">
-          <span>
-            INTELLIGENCE SNAPSHOT
+          {/* SIGNAL VISUAL */}
+          <div className="hidden shrink-0 lg:flex">
+
+            <div className="relative flex h-48 w-48 items-center justify-center">
+
+              <div className="absolute h-48 w-48 rounded-full border border-blue-400/[0.08]" />
+              <div className="absolute h-36 w-36 rounded-full border border-blue-400/[0.10]" />
+              <div className="absolute h-24 w-24 rounded-full border border-blue-400/[0.12]" />
+
+              <div className="flex h-14 w-14 items-center justify-center rounded-full border border-blue-400/20 bg-blue-500/[0.08] text-blue-300 shadow-[0_0_35px_rgba(59,130,246,0.12)]">
+                <Activity size={25} />
+              </div>
+
+              <span className="absolute right-5 top-10 h-1.5 w-1.5 rounded-full bg-blue-400 shadow-[0_0_10px_rgba(96,165,250,0.9)]" />
+
+              <span className="absolute bottom-7 left-8 h-1 w-1 rounded-full bg-emerald-400" />
+
+            </div>
+
+          </div>
+
+        </div>
+      </div>
+
+
+      {/* INTELLIGENCE SNAPSHOT */}
+      <div>
+
+        <div className="mb-3 flex items-center justify-between">
+
+          <div>
+            <p className="text-[10px] font-semibold tracking-[0.18em] text-slate-600">
+              INTELLIGENCE SNAPSHOT
+            </p>
+
+            <p className="mt-1 text-xs text-slate-500">
+              Current state of the observed social network
+            </p>
+          </div>
+
+          <span className="text-[10px] text-slate-600">
+            AUTO REFRESH · 5s
           </span>
+
         </div>
 
-        <div className="stats-grid">
-          <div className="stat-card">
-            <span>
-              ACTIVE NARRATIVES
-            </span>
 
-            <strong>
-              {loading
-                ? "—"
-                : "01"}
-            </strong>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
 
-            <small>
+          {/* NARRATIVES */}
+          <button
+            onClick={() => handleNavigation("narratives")}
+            className="group rounded-xl border border-white/[0.07] bg-[#0d1016] p-5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-blue-400/20 hover:bg-[#10141c]"
+          >
+            <div className="flex items-start justify-between">
+
+              <span className="text-[10px] font-medium tracking-[0.14em] text-slate-500">
+                ACTIVE NARRATIVES
+              </span>
+
+              <TrendingUp
+                size={16}
+                className="text-slate-600 transition-colors group-hover:text-blue-400"
+              />
+
+            </div>
+
+            <div className="mt-5 flex items-end justify-between">
+
+              <strong className="text-3xl font-semibold tracking-tight text-white">
+                {loading ? "—" : "01"}
+              </strong>
+
+              <ArrowUpRight
+                size={16}
+                className="mb-1 text-slate-700 transition-colors group-hover:text-blue-400"
+              />
+
+            </div>
+
+            <p className="mt-2 text-[11px] text-slate-600">
               Currently detected
-            </small>
-          </div>
+            </p>
+          </button>
 
-          <div className="stat-card">
-            <span>
-              ANALYZED POSTS
-            </span>
 
-            <strong>
-              {loading
-                ? "—"
-                : analyzedPosts}
-            </strong>
+          {/* POSTS */}
+          <button
+            onClick={() => handleNavigation("narratives")}
+            className="group rounded-xl border border-white/[0.07] bg-[#0d1016] p-5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-blue-400/20 hover:bg-[#10141c]"
+          >
+            <div className="flex items-start justify-between">
 
-            <small>
-              Across{" "}
-              {loading
-                ? "—"
-                : platformCount}{" "}
-              platforms
-            </small>
-          </div>
+              <span className="text-[10px] font-medium tracking-[0.14em] text-slate-500">
+                ANALYZED POSTS
+              </span>
 
-          <div className="stat-card">
-            <span>
-              NETWORK NODES
-            </span>
+              <MessageSquare
+                size={16}
+                className="text-slate-600 transition-colors group-hover:text-blue-400"
+              />
 
-            <strong>
-              {loading
-                ? "—"
-                : networkNodes}
-            </strong>
+            </div>
 
-            <small>
-              Observed users
-            </small>
-          </div>
+            <div className="mt-5 flex items-end justify-between">
 
-          <div className="stat-card">
-            <span>
-              COMMUNITIES
-            </span>
+              <strong className="text-3xl font-semibold tracking-tight text-white">
+                {loading ? "—" : analyzedPosts}
+              </strong>
 
-            <strong>
-              {loading
-                ? "—"
-                : communityCount}
-            </strong>
+              <ArrowUpRight
+                size={16}
+                className="mb-1 text-slate-700 transition-colors group-hover:text-blue-400"
+              />
 
-            <small>
+            </div>
+
+            <p className="mt-2 text-[11px] text-slate-600">
+              Across {loading ? "—" : platformCount} platforms
+            </p>
+          </button>
+
+
+          {/* NETWORK */}
+          <button
+            onClick={() => handleNavigation("network")}
+            className="group rounded-xl border border-white/[0.07] bg-[#0d1016] p-5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-blue-400/20 hover:bg-[#10141c]"
+          >
+            <div className="flex items-start justify-between">
+
+              <span className="text-[10px] font-medium tracking-[0.14em] text-slate-500">
+                NETWORK NODES
+              </span>
+
+              <Network
+                size={16}
+                className="text-slate-600 transition-colors group-hover:text-blue-400"
+              />
+
+            </div>
+
+            <div className="mt-5 flex items-end justify-between">
+
+              <strong className="text-3xl font-semibold tracking-tight text-white">
+                {loading ? "—" : networkNodes}
+              </strong>
+
+              <ArrowUpRight
+                size={16}
+                className="mb-1 text-slate-700 transition-colors group-hover:text-blue-400"
+              />
+
+            </div>
+
+            <p className="mt-2 text-[11px] text-slate-600">
+              Observed participants
+            </p>
+          </button>
+
+
+          {/* COMMUNITIES */}
+          <button
+            onClick={() => handleNavigation("network")}
+            className="group rounded-xl border border-white/[0.07] bg-[#0d1016] p-5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-blue-400/20 hover:bg-[#10141c]"
+          >
+            <div className="flex items-start justify-between">
+
+              <span className="text-[10px] font-medium tracking-[0.14em] text-slate-500">
+                COMMUNITIES
+              </span>
+
+              <Users
+                size={16}
+                className="text-slate-600 transition-colors group-hover:text-blue-400"
+              />
+
+            </div>
+
+            <div className="mt-5 flex items-end justify-between">
+
+              <strong className="text-3xl font-semibold tracking-tight text-white">
+                {loading ? "—" : communityCount}
+              </strong>
+
+              <ArrowUpRight
+                size={16}
+                className="mb-1 text-slate-700 transition-colors group-hover:text-blue-400"
+              />
+
+            </div>
+
+            <p className="mt-2 text-[11px] text-slate-600">
               Detected clusters
-            </small>
-          </div>
-        </div>
+            </p>
+          </button>
 
-        {apiError && (
-          <div className="api-error">
-            <strong>
+        </div>
+      </div>
+
+
+      {/* API ERROR */}
+      {apiError && (
+        <div className="flex items-center gap-3 rounded-xl border border-red-400/15 bg-red-400/[0.04] px-4 py-3">
+
+          <AlertTriangle
+            size={17}
+            className="shrink-0 text-red-400"
+          />
+
+          <div>
+            <p className="text-xs font-medium text-red-300">
               Intelligence API unavailable
-            </strong>
+            </p>
 
-            <span>
-              Make sure FastAPI is running on
-              127.0.0.1:8000.
-            </span>
+            <p className="mt-0.5 text-[11px] text-red-300/50">
+              Make sure FastAPI is running on 127.0.0.1:8000.
+            </p>
           </div>
-        )}
 
-        <div className="section-title">
-          <span>
-            ANALYTICS MODULES
-          </span>
+        </div>
+      )}
+
+
+      {/* LOWER INTELLIGENCE AREA */}
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1.4fr_0.8fr]">
+
+        {/* ACTIVE NARRATIVE */}
+        <div className="rounded-xl border border-white/[0.07] bg-[#0d1016] p-6">
+
+          <div className="flex items-start justify-between">
+
+            <div>
+              <p className="text-[10px] font-semibold tracking-[0.18em] text-blue-400/70">
+                ACTIVE NARRATIVE
+              </p>
+
+              <h3 className="mt-2 text-xl font-semibold text-white">
+                Fuel Price Discussion
+              </h3>
+
+              <p className="mt-1 text-xs text-slate-500">
+                Observed conversation across connected social sources
+              </p>
+            </div>
+
+            <span className="rounded-full border border-emerald-400/15 bg-emerald-400/[0.05] px-2.5 py-1 text-[9px] font-semibold tracking-wider text-emerald-400">
+              ACTIVE
+            </span>
+
+          </div>
+
+
+          <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+
+            <div className="rounded-lg border border-white/[0.05] bg-white/[0.015] p-3">
+              <span className="text-[9px] tracking-wider text-slate-600">
+                POSTS
+              </span>
+
+              <strong className="mt-1 block text-lg text-white">
+                {loading ? "—" : analyzedPosts}
+              </strong>
+            </div>
+
+            <div className="rounded-lg border border-white/[0.05] bg-white/[0.015] p-3">
+              <span className="text-[9px] tracking-wider text-slate-600">
+                PLATFORMS
+              </span>
+
+              <strong className="mt-1 block text-lg text-white">
+                {loading ? "—" : platformCount}
+              </strong>
+            </div>
+
+            <div className="rounded-lg border border-white/[0.05] bg-white/[0.015] p-3">
+              <span className="text-[9px] tracking-wider text-slate-600">
+                NEGATIVE
+              </span>
+
+              <strong className="mt-1 block text-lg text-red-300">
+                {loading ? "—" : negativePosts}
+              </strong>
+            </div>
+
+            <div className="rounded-lg border border-white/[0.05] bg-white/[0.015] p-3">
+              <span className="text-[9px] tracking-wider text-slate-600">
+                POSITIVE
+              </span>
+
+              <strong className="mt-1 block text-lg text-emerald-300">
+                {loading ? "—" : positivePosts}
+              </strong>
+            </div>
+
+          </div>
+
+
+          {/* TOPICS */}
+          <div className="mt-6">
+
+            <div className="mb-3 flex items-center justify-between">
+              <span className="text-[9px] font-semibold tracking-[0.16em] text-slate-600">
+                TOPIC SIGNALS
+              </span>
+
+              <span className="text-[9px] text-slate-700">
+                TF-IDF
+              </span>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+
+              {topics.length > 0 ? (
+                topics.slice(0, 5).map((topic, index) => (
+                  <span
+                    key={`${topic}-${index}`}
+                    className="rounded-md border border-white/[0.06] bg-white/[0.025] px-2.5 py-1.5 text-[10px] text-slate-400"
+                  >
+                    {topic}
+                  </span>
+                ))
+              ) : (
+                <span className="text-xs text-slate-600">
+                  No topic signals available
+                </span>
+              )}
+
+            </div>
+
+          </div>
+
+
+          {/* ACTION */}
+          <div className="mt-6 border-t border-white/[0.05] pt-5">
+
+            <button
+              onClick={() => handleNavigation("narratives")}
+              className="group inline-flex items-center gap-2 text-xs font-semibold text-blue-400 transition-colors hover:text-blue-300"
+            >
+              Investigate this narrative
+
+              <ArrowUpRight
+                size={14}
+                className="transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5"
+              />
+            </button>
+
+          </div>
+
+
+          {/* RECENT INTELLIGENCE */}
+          <div className="mt-6 border-t border-white/[0.05] pt-5">
+
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <p className="text-[9px] font-semibold tracking-[0.16em] text-slate-600">
+                  RECENT INTELLIGENCE
+                </p>
+
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Signals derived from observed activity
+                </p>
+              </div>
+
+              <Activity size={15} className="text-slate-600" />
+            </div>
+
+            <div className="space-y-2">
+
+              {/* SENTIMENT */}
+              <button
+                onClick={() => handleNavigation("monitoring")}
+                className="group flex w-full items-center gap-3 rounded-lg border border-white/[0.05] bg-white/[0.015] p-3 text-left transition-all duration-200 hover:border-red-400/10 hover:bg-white/[0.03]"
+              >
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-red-400/[0.06] text-red-300">
+                  <AlertTriangle size={14} />
+                </div>
+
+                <div className="min-w-0 flex-1">
+                  <p className="text-[10px] font-medium text-slate-300">
+                    Negative sentiment signal
+                  </p>
+
+                  <p className="mt-0.5 text-[10px] text-slate-600">
+                    {negativePosts} of {analyzedPosts} observed posts classified as negative
+                  </p>
+                </div>
+
+                <ArrowUpRight
+                  size={13}
+                  className="text-slate-700 transition-colors group-hover:text-red-300"
+                />
+              </button>
+
+
+              {/* NETWORK */}
+              <button
+                onClick={() => handleNavigation("network")}
+                className="group flex w-full items-center gap-3 rounded-lg border border-white/[0.05] bg-white/[0.015] p-3 text-left transition-all duration-200 hover:border-blue-400/10 hover:bg-white/[0.03]"
+              >
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-blue-400/[0.06] text-blue-300">
+                  <Network size={14} />
+                </div>
+
+                <div className="min-w-0 flex-1">
+                  <p className="text-[10px] font-medium text-slate-300">
+                    Network activity
+                  </p>
+
+                  <p className="mt-0.5 text-[10px] text-slate-600">
+                    {networkLinks} interaction links across {communityCount} communities
+                  </p>
+                </div>
+
+                <ArrowUpRight
+                  size={13}
+                  className="text-slate-700 transition-colors group-hover:text-blue-300"
+                />
+              </button>
+
+
+              {/* PROPAGATION */}
+              <button
+                onClick={() => handleNavigation("monitoring")}
+                className="group flex w-full items-center gap-3 rounded-lg border border-white/[0.05] bg-white/[0.015] p-3 text-left transition-all duration-200 hover:border-purple-400/10 hover:bg-white/[0.03]"
+              >
+                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-purple-400/[0.06] text-purple-300">
+                  <Activity size={14} />
+                </div>
+
+                <div className="min-w-0 flex-1">
+                  <p className="text-[10px] font-medium text-slate-300">
+                    Information flow
+                  </p>
+
+                  <p className="mt-0.5 text-[10px] text-slate-600">
+                    {propagation.length} propagation events observed
+                  </p>
+                </div>
+
+                <ArrowUpRight
+                  size={13}
+                  className="text-slate-700 transition-colors group-hover:text-purple-300"
+                />
+              </button>
+
+            </div>
+
+          </div>
+
         </div>
 
-        <div className="module-grid">
-          <button
-            className="module-card"
-            onClick={() =>
-              handleNavigation(
-                "narratives"
-              )
-            }
-          >
-            <TrendingUp size={22} />
 
-            <h3>
-              Narrative Detection
-            </h3>
+        {/* SIGNALS */}
+        <div className="rounded-xl border border-white/[0.07] bg-[#0d1016] p-6">
 
-            <p>
-              Identify emerging topics and
-              changes in conversation velocity.
-            </p>
-          </button>
+          <div className="flex items-center justify-between">
 
-          <button
-            className="module-card"
-            onClick={() =>
-              handleNavigation(
-                "network"
-              )
-            }
-          >
-            <Network size={22} />
+            <div>
+              <p className="text-[10px] font-semibold tracking-[0.18em] text-slate-600">
+                CURRENT SIGNALS
+              </p>
 
-            <h3>
-              Network Intelligence
-            </h3>
+              <h3 className="mt-1 text-sm font-semibold text-white">
+                Intelligence indicators
+              </h3>
+            </div>
 
-            <p>
-              Discover influential users,
-              communities and propagation paths.
-            </p>
-          </button>
+            <Zap
+              size={17}
+              className="text-slate-600"
+            />
 
-          <button
-            className="module-card"
-            onClick={() =>
-              handleNavigation(
-                "monitoring"
-              )
-            }
-          >
-            <Shield size={22} />
+          </div>
 
-            <h3>
-              Audience Intelligence
-            </h3>
 
-            <p>
-              Analyze sentiment and emotional
-              signals across social communities.
-            </p>
-          </button>
+          <div className="mt-5 space-y-3">
+
+            {/* SENTIMENT */}
+            <button
+              onClick={() => handleNavigation("monitoring")}
+              className="group flex w-full items-center gap-3 rounded-lg border border-white/[0.05] bg-white/[0.015] p-3 text-left transition-colors hover:bg-white/[0.035]"
+            >
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-red-400/[0.07] text-red-300">
+                <AlertTriangle size={15} />
+              </div>
+
+              <div className="min-w-0 flex-1">
+
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[9px] font-semibold tracking-wider text-slate-600">
+                    SENTIMENT SIGNAL
+                  </span>
+
+                  <ArrowUpRight
+                    size={13}
+                    className="text-slate-700 group-hover:text-blue-400"
+                  />
+                </div>
+
+                <p className="mt-1 text-xs font-medium text-slate-300">
+                  {negativePosts > positivePosts
+                    ? "Negative sentiment dominates"
+                    : "No dominant negative signal"}
+                </p>
+
+              </div>
+            </button>
+
+
+            {/* NETWORK */}
+            <button
+              onClick={() => handleNavigation("network")}
+              className="group flex w-full items-center gap-3 rounded-lg border border-white/[0.05] bg-white/[0.015] p-3 text-left transition-colors hover:bg-white/[0.035]"
+            >
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-blue-400/[0.07] text-blue-300">
+                <Network size={15} />
+              </div>
+
+              <div className="min-w-0 flex-1">
+
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[9px] font-semibold tracking-wider text-slate-600">
+                    NETWORK SIGNAL
+                  </span>
+
+                  <ArrowUpRight
+                    size={13}
+                    className="text-slate-700 group-hover:text-blue-400"
+                  />
+                </div>
+
+                <p className="mt-1 text-xs font-medium text-slate-300">
+                  {networkLinks > 0
+                    ? `${networkLinks} interaction links detected`
+                    : "Network awaiting data"}
+                </p>
+
+              </div>
+            </button>
+
+
+            {/* PROPAGATION */}
+            <button
+              onClick={() => handleNavigation("monitoring")}
+              className="group flex w-full items-center gap-3 rounded-lg border border-white/[0.05] bg-white/[0.015] p-3 text-left transition-colors hover:bg-white/[0.035]"
+            >
+              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-purple-400/[0.07] text-purple-300">
+                <Activity size={15} />
+              </div>
+
+              <div className="min-w-0 flex-1">
+
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[9px] font-semibold tracking-wider text-slate-600">
+                    PROPAGATION SIGNAL
+                  </span>
+
+                  <ArrowUpRight
+                    size={13}
+                    className="text-slate-700 group-hover:text-blue-400"
+                  />
+                </div>
+
+                <p className="mt-1 text-xs font-medium text-slate-300">
+                  {propagation.length > 0
+                    ? `${propagation.length} information-flow events`
+                    : "No propagation events"}
+                </p>
+
+              </div>
+            </button>
+
+          </div>
+
+
+          {/* SOURCE STATUS */}
+          <div className="mt-5 border-t border-white/[0.05] pt-5">
+
+            <div className="mb-3 flex items-center justify-between">
+              <span className="text-[9px] font-semibold tracking-[0.16em] text-slate-600">
+                OBSERVED SOURCES
+              </span>
+
+              <span className="text-[9px] text-slate-700">
+                {platformCount} ACTIVE
+              </span>
+            </div>
+
+            <div className="flex gap-2">
+
+              <div className="flex flex-1 items-center gap-2 rounded-lg border border-emerald-400/10 bg-emerald-400/[0.03] px-3 py-2">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+
+                <span className="text-[10px] text-slate-400">
+                  Telegram
+                </span>
+              </div>
+
+              <div className="flex flex-1 items-center gap-2 rounded-lg border border-white/[0.05] bg-white/[0.015] px-3 py-2">
+                <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />
+
+                <span className="text-[10px] text-slate-500">
+                  X
+                </span>
+              </div>
+
+            </div>
+
+          </div>
+
+
+          {/* LIVE INTELLIGENCE FEED */}
+          <div className="mt-5 border-t border-white/[0.05] pt-5">
+
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <p className="text-[9px] font-semibold tracking-[0.16em] text-slate-600">
+                  LIVE INTELLIGENCE FEED
+                </p>
+
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Recently ingested events
+                </p>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+                <span className="text-[9px] font-semibold tracking-wider text-emerald-400">
+                  LIVE
+                </span>
+              </div>
+            </div>
+
+            {livePosts.length > 0 ? (
+              <div className="space-y-2">
+                {[...livePosts]
+                  .slice(-4)
+                  .reverse()
+                  .map((post, index) => {
+                    const date = new Date(post.timestamp);
+                    const time = Number.isNaN(date.getTime())
+                      ? "—"
+                      : date.toLocaleTimeString([], {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        });
+
+                    return (
+                      <div
+                        key={`${post.id || post.post_id || "live"}-${index}`}
+                        className="rounded-lg border border-white/[0.05] bg-white/[0.015] p-3"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-2">
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+
+                            <span className="text-[9px] font-semibold uppercase tracking-wider text-slate-500">
+                              {post.platform || "source"}
+                            </span>
+                          </div>
+
+                          <span className="text-[9px] text-slate-700">
+                            {time}
+                          </span>
+                        </div>
+
+                        <p className="mt-2 line-clamp-2 text-[10px] leading-4 text-slate-400">
+                          {post.text}
+                        </p>
+
+                        <p className="mt-1 text-[9px] text-slate-700">
+                          {post.user_id || "unknown participant"}
+                        </p>
+                      </div>
+                    );
+                  })}
+              </div>
+            ) : (
+              <div className="rounded-lg border border-dashed border-white/[0.06] bg-white/[0.01] px-3 py-4">
+                <p className="text-[10px] font-medium text-slate-500">
+                  Waiting for live events
+                </p>
+
+                <p className="mt-1 text-[9px] leading-4 text-slate-700">
+                  New Telegram events will appear here after ingestion.
+                </p>
+              </div>
+            )}
+
+          </div>
+
         </div>
-      </section>
-    </>
-  );
 
+      </div>
+
+    </section>
+  </>
+);
   /*
    * ==============================
    * NARRATIVES PAGE
    * ==============================
    */
 
-  const renderNarratives = () => (
-    <>
-      {renderTopbar(
-        "Narrative Intelligence",
-        "NARRATIVE DETECTION"
-      )}
+  const renderNarratives = () => {
+    const narrativeStatus = trends?.status || "ANALYZING";
 
-      <section className="dashboard">
-        <div className="page-intro">
-          <div>
-            <p className="eyebrow">
-              ACTIVE NARRATIVE
-            </p>
+    return (
+      <>
+        {renderTopbar(
+          "Narrative Intelligence",
+          "NARRATIVE DETECTION"
+        )}
 
-            <h3>
-              Fuel Price Discussion
-            </h3>
+        <section className="dashboard">
 
-            <p>
-              Tracking the evolution of the
-              conversation across observed
-              social platforms.
-            </p>
+          {/* SIMPLE NARRATIVE HEADER */}
+          <div className="page-intro">
+            <div>
+              <p className="eyebrow">
+                ACTIVE NARRATIVE
+              </p>
+
+              <h3>
+                Fuel Price Discussion
+              </h3>
+
+              <p>
+                A simple view of what people are discussing,
+                how the audience is responding, and how the
+                conversation is changing.
+              </p>
+            </div>
+
+            <div className="trend-status">
+              <TrendingUp size={18} />
+
+              <span>
+                {narrativeStatus}
+              </span>
+            </div>
           </div>
 
-          <div className="trend-status">
-            <TrendingUp size={18} />
 
+          {/* KEY NUMBERS */}
+          <div className="stats-grid">
+
+            <div className="stat-card">
+              <span>
+                POST VOLUME
+              </span>
+
+              <strong>
+                {loading ? "—" : analyzedPosts}
+              </strong>
+
+              <small>
+                Observed conversation
+              </small>
+            </div>
+
+            <div className="stat-card">
+              <span>
+                GROWTH RATE
+              </span>
+
+              <strong>
+                {loading ? "—" : `${liveGrowthRate}%`}
+              </strong>
+
+              <small>
+                Latest vs previous 10-min window
+              </small>
+            </div>
+
+            <div className="stat-card">
+              <span>
+                NEGATIVE SIGNALS
+              </span>
+
+              <strong>
+                {loading ? "—" : negativePosts}
+              </strong>
+
+              <small>
+                Posts with negative sentiment
+              </small>
+            </div>
+
+            <div className="stat-card">
+              <span>
+                POSITIVE SIGNALS
+              </span>
+
+              <strong>
+                {loading ? "—" : positivePosts}
+              </strong>
+
+              <small>
+                Posts with positive sentiment
+              </small>
+            </div>
+
+          </div>
+
+
+          {/* AUDIENCE SIGNAL */}
+          <div className="section-title">
             <span>
-              {trends?.status ||
-                "ANALYZING"}
+              AUDIENCE SIGNAL
             </span>
           </div>
-        </div>
 
-        <div className="stats-grid">
-          <div className="stat-card">
-            <span>
-              POST VOLUME
-            </span>
+          <div className="timeline-card">
 
-            <strong>
-              {loading
-                ? "—"
-                : analyzedPosts}
-            </strong>
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
 
-            <small>
-              Observed conversation
-            </small>
-          </div>
+              <div>
+                <p className="text-sm font-semibold text-white">
+                  How is the audience responding?
+                </p>
 
-          <div className="stat-card">
-            <span>
-              GROWTH RATE
-            </span>
+                <p className="mt-1 text-xs text-slate-500">
+                  Sentiment distribution across the observed posts.
+                </p>
+              </div>
 
-            <strong>
-              {trends
-                ? `${trends.growth_rate}%`
-                : "—"}
-            </strong>
-
-            <small>
-              Conversation velocity
-            </small>
-          </div>
-
-          <div className="stat-card">
-            <span>
-              NEGATIVE SIGNALS
-            </span>
-
-            <strong>
-              {loading
-                ? "—"
-                : negativePosts}
-            </strong>
-
-            <small>
-              Posts with negative sentiment
-            </small>
-          </div>
-
-          <div className="stat-card">
-            <span>
-              POSITIVE SIGNALS
-            </span>
-
-            <strong>
-              {loading
-                ? "—"
-                : positivePosts}
-            </strong>
-
-            <small>
-              Posts with positive sentiment
-            </small>
-          </div>
-        </div>
-
-        <div className="section-title">
-          <span>
-            TOPIC SIGNALS
-          </span>
-        </div>
-
-        <div className="topic-grid">
-  {topics.length > 0 ? (
-    topics.map((topic, index) => (
-      <div
-        className="topic-card"
-        key={`${topic}-${index}`}
-      >
-        <span>
-          {String(index + 1).padStart(2, "0")}
-        </span>
-
-        <strong>
-          {topic}
-        </strong>
-
-        <small>
-          Detected by TF-IDF
-        </small>
-      </div>
-    ))
-  ) : (
-    <div className="topic-card">
-      <span>--</span>
-
-      <strong>
-        No topics detected
-      </strong>
-
-      <small>
-        Waiting for conversation data
-      </small>
-    </div>
-  )}
-</div>
-
-        <div className="section-title">
-          <span>
-            CONVERSATION TIMELINE
-          </span>
-        </div>
-
-        <div className="timeline-card">
-          {trends?.timeline?.map(
-            (item, index) => (
-              <div
-                className="timeline-row"
-                key={index}
+              <button
+                onClick={() => handleNavigation("monitoring")}
+                className="inline-flex w-fit items-center gap-2 rounded-lg border border-white/[0.07] bg-white/[0.02] px-3 py-2 text-[10px] font-semibold text-slate-300 transition-colors hover:bg-white/[0.05] hover:text-white"
               >
-                <div className="timeline-time">
-                  <Clock3 size={15} />
+                View monitoring
+                <ArrowUpRight size={13} />
+              </button>
 
-                  <span>
-                    {new Date(
-                      item.time_bucket
-                    ).toLocaleTimeString(
-                      [],
-                      {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      }
-                    )}
+            </div>
+
+            <div className="mt-5 space-y-3">
+
+              <div>
+                <div className="mb-1.5 flex items-center justify-between text-[10px]">
+                  <span className="text-slate-500">
+                    Negative
+                  </span>
+
+                  <span className="text-red-300">
+                    {negativePosts}
                   </span>
                 </div>
 
-                <div className="timeline-bar">
+                <div className="h-2 overflow-hidden rounded-full bg-white/[0.05]">
                   <div
-                    className="timeline-fill"
+                    className="h-full rounded-full bg-red-400/70"
                     style={{
                       width:
-                        `${Math.min(
-                          item.post_count *
-                            35,
-                          100
-                        )}%`,
+                        analyzedPosts > 0
+                          ? `${(negativePosts / analyzedPosts) * 100}%`
+                          : "0%",
                     }}
-                  ></div>
+                  />
+                </div>
+              </div>
+
+              <div>
+                <div className="mb-1.5 flex items-center justify-between text-[10px]">
+                  <span className="text-slate-500">
+                    Positive
+                  </span>
+
+                  <span className="text-emerald-300">
+                    {positivePosts}
+                  </span>
                 </div>
 
-                <strong>
-                  {item.post_count}
-                </strong>
+                <div className="h-2 overflow-hidden rounded-full bg-white/[0.05]">
+                  <div
+                    className="h-full rounded-full bg-emerald-400/70"
+                    style={{
+                      width:
+                        analyzedPosts > 0
+                          ? `${(positivePosts / analyzedPosts) * 100}%`
+                          : "0%",
+                    }}
+                  />
+                </div>
               </div>
-            )
-          )}
-        </div>
-      </section>
-    </>
-  );
+
+              <div>
+                <div className="mb-1.5 flex items-center justify-between text-[10px]">
+                  <span className="text-slate-500">
+                    Neutral
+                  </span>
+
+                  <span className="text-slate-300">
+                    {neutralPosts}
+                  </span>
+                </div>
+
+                <div className="h-2 overflow-hidden rounded-full bg-white/[0.05]">
+                  <div
+                    className="h-full rounded-full bg-slate-500/70"
+                    style={{
+                      width:
+                        analyzedPosts > 0
+                          ? `${(neutralPosts / analyzedPosts) * 100}%`
+                          : "0%",
+                    }}
+                  />
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+
+          {/* TOPICS */}
+          <div className="section-title">
+            <span>
+              WHAT ARE PEOPLE TALKING ABOUT?
+            </span>
+          </div>
+
+          <div className="topic-grid">
+
+            {topics.length > 0 ? (
+              topics.slice(0, 5).map((topic, index) => (
+                <div
+                  className="topic-card"
+                  key={`${topic}-${index}`}
+                >
+                  <span>
+                    {String(index + 1).padStart(2, "0")}
+                  </span>
+
+                  <strong>
+                    {topic}
+                  </strong>
+
+                  <small>
+                    Topic signal
+                  </small>
+                </div>
+              ))
+            ) : (
+              <div className="topic-card">
+                <span>
+                  --
+                </span>
+
+                <strong>
+                  No topics detected
+                </strong>
+
+                <small>
+                  Waiting for conversation data
+                </small>
+              </div>
+            )}
+
+          </div>
+
+
+          {/* CONVERSATION TIMELINE */}
+          <div className="section-title">
+            <span>
+              HOW IS THE CONVERSATION CHANGING?
+            </span>
+          </div>
+
+          <div className="timeline-card">
+
+            {liveTimeline.length > 0 ? (
+              liveTimeline.map((item, index) => {
+                const maxCount = Math.max(
+                  ...liveTimeline.map(
+                    (entry) => entry.post_count
+                  ),
+                  1
+                );
+
+                return (
+                  <div
+                    className="timeline-row"
+                    key={item.time_bucket}
+                  >
+                    <div className="timeline-time">
+                      <Clock3 size={15} />
+
+                      <span>
+                        {new Date(
+                          item.time_bucket
+                        ).toLocaleTimeString(
+                          [],
+                          {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          }
+                        )}
+                      </span>
+                    </div>
+
+                    <div className="timeline-bar">
+                      <div
+                        className="timeline-fill"
+                        style={{
+                          width: `${
+                            (item.post_count / maxCount) * 100
+                          }%`,
+                        }}
+                      ></div>
+                    </div>
+
+                    <strong>
+                      {item.post_count}
+                    </strong>
+                  </div>
+                );
+              })
+            ) : (
+              <div className="monitoring-empty">
+                No timeline data available.
+              </div>
+            )}
+
+            {liveTimeline.length > 0 && (
+              <p className="mt-4 text-[9px] text-slate-700">
+                Updates automatically from observed posts · 10-minute windows
+              </p>
+            )}
+
+          </div>
+
+
+          {/* INVESTIGATION PATH */}
+          <div className="flex flex-col gap-3 rounded-xl border border-white/[0.07] bg-[#0d1016] p-5 sm:flex-row sm:items-center sm:justify-between">
+
+            <div>
+              <p className="text-xs font-semibold text-white">
+                Want to understand how this narrative spreads?
+              </p>
+
+              <p className="mt-1 text-[10px] leading-4 text-slate-600">
+                Explore the network to see connected participants,
+                communities and influence metrics.
+              </p>
+            </div>
+
+            <button
+              onClick={() => handleNavigation("network")}
+              className="inline-flex w-fit shrink-0 items-center gap-2 rounded-lg border border-blue-400/15 bg-blue-500/[0.08] px-4 py-2.5 text-[10px] font-semibold text-blue-300 transition-colors hover:bg-blue-500/[0.13] hover:text-blue-200"
+            >
+              Explore network
+              <ArrowUpRight size={14} />
+            </button>
+
+          </div>
+
+        </section>
+      </>
+    );
+  };
 
   /*
    * ==============================
@@ -947,8 +1971,54 @@ function App() {
       );
     }
 
+    const communityColors = [
+      "#60a5fa",
+      "#a78bfa",
+      "#2dd4bf",
+      "#fbbf24",
+    ];
+
+    const communities = [
+      ...new Set(
+        graphNodes.map((node) =>
+          String(node.community ?? 0)
+        )
+      ),
+    ].sort((a, b) => {
+      const aNum = Number(a);
+      const bNum = Number(b);
+
+      if (
+        Number.isFinite(aNum) &&
+        Number.isFinite(bNum)
+      ) {
+        return aNum - bNum;
+      }
+
+      return a.localeCompare(b);
+    });
+
+    const communityAnchors = [
+      { x: 245, y: 180 },
+      { x: 615, y: 180 },
+      { x: 245, y: 430 },
+      { x: 615, y: 430 },
+    ];
+
+    const maxInfluence = Math.max(
+      ...graphNodes.map((node) =>
+        Number(
+          node.influence_score ||
+            node.influence ||
+            node.pagerank ||
+            0
+        )
+      ),
+      0.01
+    );
+
     return (
-      <div className="network-graph-card">
+      <div id="network-topology-card" className="network-graph-card network-graph-enhanced">
         <div className="graph-header">
           <div>
             <strong>
@@ -956,7 +2026,7 @@ function App() {
             </strong>
 
             <span>
-              Influence, relationships and community structure
+              Communities, connections and structural influence
             </span>
           </div>
 
@@ -970,15 +2040,87 @@ function App() {
               <i className="legend-line"></i>
               Connection
             </span>
+
+            <span>
+              <i className="legend-size"></i>
+              Size = influence
+            </span>
           </div>
         </div>
 
-        <div className="graph-container">
+        <div className="graph-container relative">
           <svg
             className="network-svg"
-            viewBox="0 0 860 560"
+            viewBox="0 0 860 620"
             preserveAspectRatio="xMidYMid meet"
+            role="img"
+            aria-label="Social network topology showing communities, connections and influential users"
           >
+            {/* Subtle graph field */}
+            <rect
+              x="0"
+              y="0"
+              width="860"
+              height="620"
+              fill="rgba(255,255,255,0.005)"
+            />
+
+            {/* Community zones */}
+            {communities.map(
+              (community, index) => {
+                const anchor =
+                  communityAnchors[
+                    index %
+                      communityAnchors.length
+                  ];
+
+                const communityColor =
+                  communityColors[
+                    index %
+                      communityColors.length
+                  ];
+
+                return (
+                  <g
+                    key={`community-zone-${community}`}
+                    pointerEvents="none"
+                  >
+                    <circle
+                      cx={anchor.x}
+                      cy={anchor.y}
+                      r="112"
+                      fill={communityColor}
+                      opacity="0.025"
+                    />
+
+                    <circle
+                      cx={anchor.x}
+                      cy={anchor.y}
+                      r="112"
+                      fill="none"
+                      stroke={communityColor}
+                      strokeWidth="1"
+                      strokeDasharray="4 8"
+                      opacity="0.18"
+                    />
+
+                    <text
+                      x={anchor.x - 94}
+                      y={anchor.y - 91}
+                      fill={communityColor}
+                      opacity="0.65"
+                      fontSize="10"
+                      fontWeight="600"
+                      letterSpacing="1.5"
+                    >
+                      COMMUNITY {community}
+                    </text>
+                  </g>
+                );
+              }
+            )}
+
+            {/* Connections */}
             {(network.links || []).map(
               (link, index) => {
                 const source =
@@ -998,18 +2140,57 @@ function App() {
                   return null;
                 }
 
+                const sourceCommunity =
+                  String(
+                    source.community ?? 0
+                  );
+
+                const targetCommunity =
+                  String(
+                    target.community ?? 0
+                  );
+
+                const isCrossCommunity =
+                  sourceCommunity !==
+                  targetCommunity;
+
                 return (
-                  <g key={index}>
+                  <g
+                    key={`link-${index}`}
+                    onClick={() => {
+                      setSelectedConnection(index);
+                      setSelectedNode(source);
+                    }}
+                    style={{ cursor: "pointer" }}
+                  >
                     <line
-                      className="graph-link"
                       x1={source.x}
                       y1={source.y}
                       x2={target.x}
                       y2={target.y}
+                      stroke={
+                        selectedConnection === index
+                          ? "#60a5fa"
+                          : isCrossCommunity
+                          ? "rgba(148,163,184,0.30)"
+                          : "rgba(96,165,250,0.22)"
+                      }
+                      strokeWidth={
+                        selectedConnection === index
+                          ? "3"
+                          : isCrossCommunity
+                          ? "1.6"
+                          : "1.2"
+                      }
+                      opacity={
+                        selectedConnection !== null &&
+                        selectedConnection !== index
+                          ? "0.45"
+                          : "1"
+                      }
                     />
 
                     <circle
-                      className="graph-link-point"
                       cx={
                         (source.x +
                           target.x) /
@@ -1020,13 +2201,25 @@ function App() {
                           target.y) /
                         2
                       }
-                      r="2"
+                      r={
+                        selectedConnection === index
+                          ? "3.5"
+                          : "2"
+                      }
+                      fill={
+                        selectedConnection === index
+                          ? "#60a5fa"
+                          : isCrossCommunity
+                          ? "rgba(203,213,225,0.50)"
+                          : "rgba(148,163,184,0.35)"
+                      }
                     />
                   </g>
                 );
               }
             )}
 
+            {/* Users */}
             {graphNodes.map(
               (node, index) => {
                 const nodeId =
@@ -1043,21 +2236,33 @@ function App() {
                       0
                   );
 
+                const normalizedInfluence =
+                  Math.min(
+                    influence /
+                      maxInfluence,
+                    1
+                  );
+
                 const radius =
+                  17 +
+                  normalizedInfluence *
+                    15;
+
+                const communityIndex =
                   Math.max(
-                    18,
-                    Math.min(
-                      32,
-                      18 +
-                        influence *
-                          45
+                    0,
+                    communities.indexOf(
+                      String(
+                        node.community ?? 0
+                      )
                     )
                   );
 
-                const community =
-                  Number(
-                    node.community || 0
-                  );
+                const communityColor =
+                  communityColors[
+                    communityIndex %
+                      communityColors.length
+                  ];
 
                 const isSelected =
                   selectedNode &&
@@ -1067,11 +2272,29 @@ function App() {
                     selectedNode.name
                   ) === nodeId;
 
+                const selectedLink =
+                  selectedConnection !== null
+                    ? network.links[
+                        selectedConnection
+                      ]
+                    : null;
+
+                const isConnectionEndpoint =
+                  selectedLink &&
+                  (
+                    selectedLink.source === nodeId ||
+                    selectedLink.target === nodeId
+                  );
+
+                const isEmphasized =
+                  isSelected ||
+                  isConnectionEndpoint;
+
                 return (
                   <g
                     key={nodeId}
                     className={`graph-node ${
-                      isSelected
+                      isEmphasized
                         ? "selected"
                         : ""
                     }`}
@@ -1080,41 +2303,70 @@ function App() {
                         node
                       )
                     }
+                    style={{
+                      cursor: "pointer",
+                    }}
                   >
+                    {/* Influence halo */}
                     <circle
-                      className="node-glow"
                       cx={node.x}
                       cy={node.y}
-                      r={radius + 9}
+                      r={radius + 10}
+                      fill={communityColor}
+                      opacity={
+                        isEmphasized
+                          ? "0.14"
+                          : "0.045"
+                      }
                     />
 
+                    {/* Community ring */}
                     <circle
-                      className={`community-ring community-${
-                        community % 4
-                      }`}
                       cx={node.x}
                       cy={node.y}
                       r={radius + 5}
+                      fill="rgba(9,11,16,0.92)"
+                      stroke={communityColor}
+                      strokeWidth={
+                        isEmphasized
+                          ? "2.5"
+                          : "1.5"
+                      }
+                      opacity="0.95"
                     />
 
+                    {/* Node body */}
                     <circle
-                      className="node-circle"
                       cx={node.x}
                       cy={node.y}
                       r={radius}
+                      fill="#0c1119"
+                      stroke={
+                        isEmphasized
+                          ? "#ffffff"
+                          : "rgba(226,232,240,0.55)"
+                      }
+                      strokeWidth={
+                        isSelected
+                          ? "2"
+                          : "1"
+                      }
                     />
 
+                    {/* Node index */}
                     <text
-                      className="node-index"
                       x={node.x}
-                      y={node.y + 3}
+                      y={node.y + 4}
                       textAnchor="middle"
+                      fill="#f8fafc"
+                      fontSize="12"
+                      fontWeight="600"
                     >
                       {index + 1}
                     </text>
 
+                    {/* User label */}
                     <text
-                      className="node-label"
                       x={node.x}
                       y={
                         node.y +
@@ -1122,29 +2374,142 @@ function App() {
                         17
                       }
                       textAnchor="middle"
+                      fill={
+                        isEmphasized
+                          ? "#ffffff"
+                          : "#94a3b8"
+                      }
+                      fontSize="11"
+                      fontWeight={
+                        isEmphasized
+                          ? "600"
+                          : "400"
+                      }
                     >
                       {nodeId}
                     </text>
+
+                    {/* Community marker */}
+                    <circle
+                      cx={
+                        node.x +
+                        radius *
+                          0.68
+                      }
+                      cy={
+                        node.y -
+                        radius *
+                          0.68
+                      }
+                      r="4"
+                      fill={communityColor}
+                      stroke="#0b0e14"
+                      strokeWidth="2"
+                    />
                   </g>
                 );
               }
             )}
+
+            {/* Center explanation */}
+            <g pointerEvents="none">
+              <circle
+                cx="430"
+                cy="305"
+                r="34"
+                fill="rgba(11,14,20,0.82)"
+                stroke="rgba(148,163,184,0.12)"
+              />
+
+              <text
+                x="430"
+                y="301"
+                textAnchor="middle"
+                fill="#64748b"
+                fontSize="8"
+                fontWeight="600"
+                letterSpacing="1.2"
+              >
+                OBSERVED
+              </text>
+
+              <text
+                x="430"
+                y="314"
+                textAnchor="middle"
+                fill="#94a3b8"
+                fontSize="8"
+                fontWeight="600"
+                letterSpacing="1.2"
+              >
+                NETWORK
+              </text>
+            </g>
           </svg>
 
+          {/* Graph controls / explanation */}
+          <div className="absolute left-4 top-4 flex flex-col gap-2">
+            <div className="rounded-lg border border-white/[0.06] bg-[#0b0f16]/90 px-3 py-2 backdrop-blur-sm">
+              <p className="text-[9px] font-semibold tracking-[0.14em] text-slate-500">
+                HOW TO READ
+              </p>
+
+              <p className="mt-1 text-[10px] text-slate-400">
+                Larger nodes indicate higher structural influence.
+              </p>
+            </div>
+
+            <div className="rounded-lg border border-white/[0.06] bg-[#0b0f16]/90 px-3 py-2 backdrop-blur-sm">
+              <p className="text-[9px] font-semibold tracking-[0.14em] text-slate-500">
+                INTERACTION
+              </p>
+
+              <p className="mt-1 text-[10px] text-slate-400">
+                Lines represent observed relationships.
+              </p>
+            </div>
+          </div>
+
+          {/* Community legend */}
+          <div className="absolute bottom-4 left-4 flex flex-wrap gap-2">
+            {communities.map(
+              (community, index) => (
+                <div
+                  key={`legend-${community}`}
+                  className="flex items-center gap-2 rounded-md border border-white/[0.06] bg-[#0b0f16]/90 px-2.5 py-1.5 backdrop-blur-sm"
+                >
+                  <span
+                    className="h-2 w-2 rounded-full"
+                    style={{
+                      background:
+                        communityColors[
+                          index %
+                            communityColors.length
+                        ],
+                    }}
+                  />
+
+                  <span className="text-[9px] text-slate-400">
+                    Community {community}
+                  </span>
+                </div>
+              )
+            )}
+          </div>
+
+          {/* Selected node */}
           {selectedNode && (
-            <div className="selected-node-panel">
-              <div className="selected-node-header">
+            <div className="absolute right-4 top-4 w-[260px] rounded-xl border border-white/[0.08] bg-[#0b0f16]/95 p-4 shadow-2xl backdrop-blur-md">
+              <div className="flex items-start justify-between gap-3">
                 <div>
-                  <span>
-                    SELECTED NODE
+                  <span className="text-[9px] font-semibold tracking-[0.15em] text-blue-400/70">
+                    SELECTED PARTICIPANT
                   </span>
 
-                  <strong>
-                    {
-                      selectedNode.user_id ||
+                  <strong className="mt-1 block text-sm text-white">
+                    {selectedNode.user_id ||
                       selectedNode.id ||
-                      selectedNode.name
-                    }
+                      selectedNode.name}
                   </strong>
                 </div>
 
@@ -1152,63 +2517,76 @@ function App() {
                   onClick={() =>
                     setSelectedNode(null)
                   }
+                  className="text-lg leading-none text-slate-600 transition-colors hover:text-white"
                   aria-label="Close node details"
                 >
                   ×
                 </button>
               </div>
 
-              <div className="selected-node-metrics">
-                <div>
-                  <small>
+              <div className="mt-4 grid grid-cols-2 gap-2">
+                <div className="rounded-lg border border-white/[0.05] bg-white/[0.02] p-2.5">
+                  <small className="block text-[8px] tracking-wider text-slate-600">
                     COMMUNITY
                   </small>
 
-                  <strong>
+                  <strong className="mt-1 block text-sm text-white">
                     {selectedNode.community ??
                       "—"}
                   </strong>
                 </div>
 
-                <div>
-                  <small>
-                    PAGERANK
-                  </small>
-
-                  <strong>
-                    {selectedNode.pagerank ??
-                      "—"}
-                  </strong>
-                </div>
-
-                <div>
-                  <small>
-                    BETWEENNESS
-                  </small>
-
-                  <strong>
-                    {selectedNode.betweenness ??
-                      "—"}
-                  </strong>
-                </div>
-
-                <div>
-                  <small>
+                <div className="rounded-lg border border-white/[0.05] bg-white/[0.02] p-2.5">
+                  <small className="block text-[8px] tracking-wider text-slate-600">
                     INFLUENCE
                   </small>
 
-                  <strong>
+                  <strong className="mt-1 block text-sm text-white">
                     {selectedNode.influence_score ??
                       selectedNode.influence ??
                       "—"}
                   </strong>
                 </div>
+
+                <div className="rounded-lg border border-white/[0.05] bg-white/[0.02] p-2.5">
+                  <small className="block text-[8px] tracking-wider text-slate-600">
+                    PAGERANK
+                  </small>
+
+                  <strong className="mt-1 block text-sm text-slate-300">
+                    {selectedNode.pagerank ??
+                      "—"}
+                  </strong>
+                </div>
+
+                <div className="rounded-lg border border-white/[0.05] bg-white/[0.02] p-2.5">
+                  <small className="block text-[8px] tracking-wider text-slate-600">
+                    BETWEENNESS
+                  </small>
+
+                  <strong className="mt-1 block text-sm text-slate-300">
+                    {selectedNode.betweenness ??
+                      "—"}
+                  </strong>
+                </div>
               </div>
 
-              <p>
-                Node represents an observed participant
-                in the social information network.
+              <p className="mt-3 text-[9px] leading-4 text-slate-600">
+                Structural metrics describe the participant's
+                position within the observed network.
               </p>
+            </div>
+          )}
+
+          {!selectedNode && (
+            <div className="absolute bottom-4 right-4 rounded-lg border border-white/[0.06] bg-[#0b0f16]/90 px-3 py-2 backdrop-blur-sm">
+              <div className="flex items-center gap-2">
+                <Users size={13} className="text-slate-500" />
+
+                <span className="text-[9px] font-medium text-slate-500">
+                  Click a participant to inspect
+                </span>
+              </div>
             </div>
           )}
         </div>
@@ -1325,63 +2703,108 @@ function App() {
           </span>
         </div>
 
+        <div className="mb-4 rounded-xl border border-white/[0.06] bg-white/[0.015] p-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-blue-400/10 bg-blue-400/[0.05] text-blue-300">
+              <TrendingUp size={15} />
+            </div>
+
+            <div>
+              <p className="text-[10px] font-semibold tracking-[0.14em] text-slate-500">
+                HOW TO INTERPRET
+              </p>
+
+              <p className="mt-1 text-[10px] leading-5 text-slate-500">
+                <span className="text-slate-300">PageRank</span> shows structural importance ·{" "}
+                <span className="text-slate-300">Betweenness</span> shows bridge position ·{" "}
+                <span className="text-slate-300">Influence</span> is the SocialSense influence signal.
+              </p>
+            </div>
+          </div>
+        </div>
+
         <div className="influence-card">
           {topInfluencers.map(
-            (user, index) => (
-              <div
-                className="influence-row"
-                key={user.user_id}
-              >
-                <div className="rank">
-                  0{index + 1}
-                </div>
+            (user, index) => {
+              const isRankedSelected =
+                selectedNode &&
+                (
+                  selectedNode.user_id ||
+                  selectedNode.id ||
+                  selectedNode.name
+                ) === user.user_id;
 
-                <div className="user-icon">
-                  <Users size={16} />
-                </div>
+              return (
+                <button
+                  type="button"
+                  className={`influence-row w-full text-left transition-colors ${
+                    isRankedSelected
+                      ? "bg-blue-400/[0.045]"
+                      : "hover:bg-white/[0.025]"
+                  }`}
+                  key={user.user_id}
+                  onClick={() =>
+                    inspectParticipant(
+                      nodeMap[user.user_id] || user
+                    )
+                  }
+                >
+                  <div className="rank">
+                    {String(index + 1).padStart(2, "0")}
+                  </div>
 
-                <div className="user-info">
-                  <strong>
-                    {user.user_id}
-                  </strong>
+                  <div className="user-icon">
+                    <Users size={16} />
+                  </div>
 
-                  <span>
-                    Community{" "}
-                    {user.community}
-                  </span>
-                </div>
+                  <div className="user-info">
+                    <strong>
+                      {user.user_id}
+                    </strong>
 
-                <div className="metric">
-                  <small>
-                    PageRank
-                  </small>
+                    <span>
+                      Community{" "}
+                      {user.community}
+                    </span>
+                  </div>
 
-                  <strong>
-                    {user.pagerank}
-                  </strong>
-                </div>
+                  <div className="metric">
+                    <small>
+                      PageRank
+                    </small>
 
-                <div className="metric">
-                  <small>
-                    Betweenness
-                  </small>
+                    <strong>
+                      {user.pagerank}
+                    </strong>
+                  </div>
 
-                  <strong>
-                    {user.betweenness}
-                  </strong>
-                </div>
+                  <div className="metric">
+                    <small>
+                      Betweenness
+                    </small>
 
-                <div className="influence-score">
-                  <small>
-                    Influence
-                  </small>
+                    <strong>
+                      {user.betweenness}
+                    </strong>
+                  </div>
 
-                  <strong>
-                    {user.influence_score}
-                  </strong>
-                </div>
-              </div>
-            )
+                  <div className="influence-score">
+                    <small>
+                      Influence
+                    </small>
+
+                    <strong>
+                      {user.influence_score}
+                    </strong>
+                  </div>
+
+                  <ArrowUpRight
+                    size={14}
+                    className="mr-1 text-slate-700 transition-colors group-hover:text-blue-300"
+                  />
+                </button>
+              );
+            }
           )}
         </div>
 
@@ -1393,26 +2816,44 @@ function App() {
 
         <div className="connections-grid">
           {network.links.map(
-            (link, index) => (
-              <div
-                className="connection-card"
-                key={index}
-              >
-                <strong>
-                  {link.source}
-                </strong>
+            (link, index) => {
+              const isSelected =
+                selectedConnection === index;
 
-                <ArrowUpRight size={15} />
+              return (
+                <button
+                  type="button"
+                  className={`connection-card text-left transition-all ${
+                    isSelected
+                      ? "border-blue-400/25 bg-blue-400/[0.045]"
+                      : "hover:border-white/[0.10] hover:bg-white/[0.025]"
+                  }`}
+                  key={index}
+                  onClick={() =>
+                    inspectConnection(
+                      link,
+                      index
+                    )
+                  }
+                >
+                  <div className="flex min-w-0 flex-1 items-center gap-2">
+                    <strong>
+                      {link.source}
+                    </strong>
 
-                <strong>
-                  {link.target}
-                </strong>
+                    <ArrowUpRight size={15} />
 
-                <span>
-                  {link.interaction}
-                </span>
-              </div>
-            )
+                    <strong>
+                      {link.target}
+                    </strong>
+                  </div>
+
+                  <span>
+                    {link.interaction}
+                  </span>
+                </button>
+              );
+            }
           )}
         </div>
       </section>
@@ -1559,7 +3000,7 @@ function App() {
               </strong>
 
               <small>
-                Derived from sentiment activity
+                Based on observed conversation activity and sentiment signals
               </small>
             </div>
           </div>
@@ -1675,6 +3116,45 @@ function App() {
                   ></div>
                 </div>
               </div>
+            </div>
+
+            {/* DOMINANT EMOTION */}
+            <div className="mt-5 border-t border-white/[0.05] pt-4">
+              <div className="flex items-center justify-between gap-4">
+                <div>
+                  <span className="text-[9px] font-semibold tracking-[0.16em] text-slate-600">
+                    DOMINANT EMOTION
+                  </span>
+
+                  <strong className="mt-1 block text-sm text-white">
+                    {loading
+                      ? "—"
+                      : emotionSummary.dominant || "No emotion signal"}
+                  </strong>
+
+                  <p className="mt-1 text-[10px] leading-4 text-slate-600">
+                    {emotionSummary.dominant
+                      ? `${emotionSummary.count} observed posts`
+                      : "Waiting for emotion analysis output"}
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-right">
+                  <span className="block text-[8px] tracking-wider text-slate-600">
+                    EMOTION DATA
+                  </span>
+
+                  <strong className="mt-1 block text-xs text-slate-300">
+                    {loading
+                      ? "—"
+                      : emotionSummary.total}
+                  </strong>
+                </div>
+              </div>
+
+              <p className="mt-3 text-[9px] leading-4 text-slate-700">
+                Aggregate textual-expression signal; not a profile of any individual.
+              </p>
             </div>
           </div>
 
